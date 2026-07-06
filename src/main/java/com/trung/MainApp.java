@@ -15,6 +15,7 @@ import javafx.scene.input.ClipboardContent;
 import javafx.scene.input.KeyCode;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.layout.HBox;
+import javafx.stage.FileChooser;
 import javafx.stage.Stage;
 import org.openqa.selenium.By;
 import org.openqa.selenium.WebDriver;
@@ -22,6 +23,9 @@ import org.openqa.selenium.WebElement;
 import org.openqa.selenium.chrome.ChromeDriver;
 import org.openqa.selenium.chrome.ChromeOptions;
 
+import java.io.File;
+import java.io.PrintWriter;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
@@ -38,9 +42,13 @@ public class MainApp extends Application {
         HBox topBox = new HBox(10);
         TextField txtUrl = new TextField("https://www.amazon.co.jp/s?k=iphone...");
         txtUrl.setPrefWidth(500);
+
         Button btnCrawl = new Button("Lấy Dữ Liệu");
+        Button btnExport = new Button("Xuất CSV");
+
         Label lblStatus = new Label("Trạng thái: Sẵn sàng");
-        topBox.getChildren().addAll(txtUrl, btnCrawl, lblStatus);
+
+        topBox.getChildren().addAll(txtUrl, btnCrawl, btnExport, lblStatus);
         root.setTop(topBox);
 
         TableView<Product> table = new TableView<>();
@@ -63,13 +71,11 @@ public class MainApp extends Application {
         colImage.setCellValueFactory(new PropertyValueFactory<>("imageUrl"));
 
         table.getColumns().addAll(colAsin, colTitle, colPrice, colImage);
-
-        table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN); // auto giãn để fill 100% width
+        table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
 
         table.getSelectionModel().setCellSelectionEnabled(true);
         table.getSelectionModel().setSelectionMode(SelectionMode.SINGLE);
 
-        // copy
         table.setOnKeyPressed(event -> {
             if (event.isControlDown() && event.getCode() == KeyCode.C) {
                 var posList = table.getSelectionModel().getSelectedCells();
@@ -88,6 +94,44 @@ public class MainApp extends Application {
 
         root.setCenter(table);
 
+        btnExport.setOnAction(event -> {
+            if (productList.isEmpty()) {
+                lblStatus.setText("Không có dữ liệu để xuất!");
+                return;
+            }
+
+            FileChooser fileChooser = new FileChooser();
+            fileChooser.setTitle("Lưu file CSV");
+            fileChooser.setInitialFileName("amazon_products.csv");
+            fileChooser.getExtensionFilters().add(new FileChooser.ExtensionFilter("CSV Files", "*.csv"));
+
+            File file = fileChooser.showSaveDialog(primaryStage);
+
+            if (file != null) {
+                try (PrintWriter writer = new PrintWriter(file, StandardCharsets.UTF_8)) {
+                    writer.write('\ufeff');
+
+                    // cột
+                    writer.println("ASIN,Title,Price,Image URL");
+
+                    // hàng
+                    for (Product p : productList) {
+                        String asin = escapeCsv(p.getAsin());
+                        String title = escapeCsv(p.getTitle());
+                        String price = escapeCsv(p.getPrice());
+                        String imageUrl = escapeCsv(p.getImageUrl());
+
+                        writer.println(asin + "," + title + "," + price + "," + imageUrl);
+                    }
+                    lblStatus.setText("Đã xuất CSV thành công!");
+                }
+                catch (Exception e) {
+                    e.printStackTrace();
+                    lblStatus.setText("Lỗi khi lưu file: " + e.getMessage());
+                }
+            }
+        });
+
         btnCrawl.setOnAction(event -> {
             String url = txtUrl.getText();
             if (url.isEmpty()) return;
@@ -104,7 +148,6 @@ public class MainApp extends Application {
                     driver = new ChromeDriver(options);
 
                     driver.manage().timeouts().implicitlyWait(Duration.ofSeconds(5));
-
                     driver.get(url);
 
                     Platform.runLater(() -> lblStatus.setText("Đang lấy list ASIN..."));
@@ -122,7 +165,6 @@ public class MainApp extends Application {
                         String asin = asinList.get(i);
                         driver.get("https://www.amazon.co.jp/dp/" + asin);
 
-                        // Check Captcha mỗi khi vào link mới
                         if (driver.getTitle().toLowerCase().contains("captcha")) {
                             throw new RuntimeException("Bị chặn Captcha ở ASIN: " + asin);
                         }
@@ -138,28 +180,22 @@ public class MainApp extends Application {
                             lblStatus.setText("Đã lấy: " + asin);
                         });
 
-//                        (Anti-Scraping): Delay ngẫu nhiên từ 1500ms đến 3000ms
-//                        long randomDelay = 1500 + (long)(Math.random() * 1500);
                         Thread.sleep(2000);
                     }
 
                     Platform.runLater(() -> lblStatus.setText("Hoàn tất!"));
 
-                }
-                catch (Exception e) {
+                } catch (Exception e) {
                     e.printStackTrace();
                     Platform.runLater(() -> lblStatus.setText("Lỗi: " + e.getMessage()));
-                }
-                finally {
+                } finally {
                     try {
                         if (driver != null) {
                             driver.quit();
                         }
-                    }
-                    catch (Exception ex) {
+                    } catch (Exception ex) {
                         System.err.println("Lỗi khi giải phóng ChromeDriver: " + ex.getMessage());
-                    }
-                    finally {
+                    } finally {
                         Platform.runLater(() -> btnCrawl.setDisable(false));
                     }
                 }
@@ -173,6 +209,22 @@ public class MainApp extends Application {
         primaryStage.setTitle("Amazon Scraper");
         primaryStage.setScene(scene);
         primaryStage.show();
+    }
+
+    /**
+     * Hàm phụ trợ (Helper method) giúp làm sạch chuỗi trước khi ném vào CSV.
+     * Nếu chuỗi có chứa dấu phẩy, nháy kép hoặc xuống dòng, nó sẽ bọc ngoặc kép lại.
+     */
+    private String escapeCsv(String data) {
+        if (data == null) return "";
+        // Nếu trong chuỗi có sẵn dấu ngoặc kép, phải nhân đôi nó lên theo quy tắc CSV
+        String escapedData = data.replace("\"", "\"\"");
+
+        // Nếu có chứa ký tự đặc biệt làm vỡ cấu trúc CSV, bọc toàn bộ bằng ngoặc kép
+        if (escapedData.contains(",") || escapedData.contains("\"") || escapedData.contains("\n")) {
+            escapedData = "\"" + escapedData + "\"";
+        }
+        return escapedData;
     }
 
     public static void main(String[] args) {
