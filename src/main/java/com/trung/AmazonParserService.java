@@ -106,8 +106,10 @@ public class AmazonParserService {
                 if (!elements.isEmpty()) {
                     rawPrice = elements.get(0).getText().trim();
                 }
-            } catch (Exception ignored) {
-            } finally {
+            }
+            catch (Exception ignored) {
+            }
+            finally {
                 driver.manage().timeouts().implicitlyWait(Duration.ofSeconds(5));
             }
         }
@@ -154,6 +156,88 @@ public class AmazonParserService {
         }
 
         return bestMatch != null ? bestMatch : rawPrice;
+    }
+
+    // ======================= EXTRACT STOCK =======================
+    public static String extractStock(WebDriver driver) {
+        String[] selectors = {
+                "#availability",
+                "#availabilityInsideBuyBox_feature_div",
+                "#availability_feature_div",
+                "#outOfStock",
+        };
+        String rawText = findFirstText(driver, selectors, false);
+
+        if (rawText == null || rawText.isEmpty()) return "Unknown";
+        return parseStock(rawText);
+    }
+
+    /**
+     * Parse stock status từ chuỗi thô Amazon.
+     * Package-private để unit test được.
+     */
+    static String parseStock(String rawText) {
+        if (rawText == null || rawText.isEmpty()) return "Unknown";
+        String lower = rawText.toLowerCase().trim();
+
+        Pattern normalizedLeftPattern = Pattern.compile(
+                "(?:only\\s*)?(\\d+)\\s*(?:left in stock|left)|(?:\\u6b8b\\u308a)\\s*(\\d+)\\s*(?:\\u70b9|\\u500b)",
+                Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CHARACTER_CLASS
+        );
+        Matcher normalizedLeftMatcher = normalizedLeftPattern.matcher(rawText);
+        if (normalizedLeftMatcher.find()) {
+            String count = normalizedLeftMatcher.group(1) != null
+                    ? normalizedLeftMatcher.group(1)
+                    : normalizedLeftMatcher.group(2);
+            return "Only " + count + " left in stock";
+        }
+
+        if (lower.contains("cannot be shipped to your selected delivery location")
+                || lower.contains("cannot ship to your selected delivery location")
+                || lower.contains("this item cannot be shipped")
+                || lower.contains("\u3053\u306e\u5546\u54c1\u306f\u9078\u629e\u3057\u305f\u304a\u5c4a\u3051\u5148\u306b\u306f\u767a\u9001\u3067\u304d\u307e\u305b\u3093")) {
+            return "Unavailable for selected address";
+        }
+
+        if (lower.contains("currently unavailable")
+                || lower.contains("temporarily out of stock")
+                || lower.contains("out of stock")
+                || lower.contains("\u73fe\u5728\u5728\u5eab\u5207\u308c")
+                || lower.contains("\u5728\u5eab\u5207\u308c")
+                || lower.contains("\u518d\u5165\u8377\u4e88\u5b9a")) {
+            return "Out of Stock";
+        }
+
+        if (lower.contains("in stock")
+                || lower.contains("available to ship")
+                || lower.contains("usually ships")
+                || lower.contains("\u5728\u5eab\u3042\u308a")) {
+            return "In Stock";
+        }
+
+        // Case 1: Hết hàng
+        if (lower.contains("currently unavailable")
+                || lower.contains("out of stock")
+                || lower.contains("在庫切れ")) {
+            return "Out of Stock";
+        }
+
+        // Case 2: Chỉ còn X sản phẩm — Regex bắt số
+        Pattern leftPattern = Pattern.compile(
+                "(?:only|残り)\\s*(\\d+)\\s*(?:left|点)", Pattern.CASE_INSENSITIVE
+        );
+        Matcher m = leftPattern.matcher(rawText);
+        if (m.find()) {
+            return "Only " + m.group(1) + " left in stock";
+        }
+
+        // Case 3: Còn hàng
+        if (lower.contains("in stock") || lower.contains("在庫あり")) {
+            return "In Stock";
+        }
+
+        // Default
+        return "Unknown";
     }
 
     // ======================= EXTRACT IMAGE =======================

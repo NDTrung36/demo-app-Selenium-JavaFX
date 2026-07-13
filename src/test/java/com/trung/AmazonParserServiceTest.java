@@ -85,4 +85,28 @@ class AmazonParserServiceTest {
         assertEquals("¥980", AmazonParserService.parsePrice("¥980"));
         assertEquals("¥1,298,000", AmazonParserService.parsePrice("¥1,298,000"));
     }
+
+    // =================== TEST CASE: parseStock ===================
+    @ParameterizedTest(name = "[{index}] \"{0}\" → \"{1}\"")
+    @DisplayName("Stock: parse trạng thái tồn kho")
+    @CsvSource({
+            "'In Stock.',                                  'In Stock'",
+            "'在庫あり。',                                   'In Stock'",
+            "'Currently unavailable.',                     'Out of Stock'",
+            "'出品者からお求めいただけます。在庫切れ',            'Out of Stock'",
+            "'Only 3 left in stock.',                      'Only 3 left in stock'",
+            "'残り5点。',                                    'Only 5 left in stock'",
+            "'Only 12 left in stock - order soon.',        'Only 12 left in stock'",
+    })
+    void testParseStock(String input, String expected) {
+        assertEquals(expected, AmazonParserService.parseStock(input));
+    }
+
+    @Test
+    @DisplayName("Stock: chuỗi rỗng hoặc null → Unknown")
+    void testParseStockEmptyAndNull() {
+        assertEquals("Unknown", AmazonParserService.parseStock(""));
+        assertEquals("Unknown", AmazonParserService.parseStock(null));
+        assertEquals("Unknown", AmazonParserService.parseStock("some random text"));
+    }
 }

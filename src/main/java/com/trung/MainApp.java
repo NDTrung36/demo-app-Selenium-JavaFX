@@ -1,7 +1,5 @@
 package com.trung;
 
-import com.trung.AmazonParserService;
-import io.github.bonigarcia.wdm.WebDriverManager;
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.collections.FXCollections;
@@ -18,17 +16,14 @@ import javafx.scene.layout.HBox;
 import javafx.stage.FileChooser;
 import javafx.stage.Stage;
 import org.openqa.selenium.By;
-import org.openqa.selenium.WebDriver;
 import org.openqa.selenium.WebElement;
-import org.openqa.selenium.chrome.ChromeDriver;
 import org.openqa.selenium.chrome.ChromeOptions;
 
 import java.io.File;
-import java.io.PrintWriter;
-import java.nio.charset.StandardCharsets;
-import java.time.Duration;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 public class MainApp extends Application {
 
@@ -54,6 +49,8 @@ public class MainApp extends Application {
         TableView<Product> table = new TableView<>();
         table.setItems(productList);
 
+//        JCheckBox cb = new JCheckBox("Tick");
+
         TableColumn<Product, String> colAsin = new TableColumn<>("ASIN");
         colAsin.setCellValueFactory(new PropertyValueFactory<>("asin"));
         colAsin.setMinWidth(120);
@@ -70,7 +67,10 @@ public class MainApp extends Application {
         TableColumn<Product, String> colImage = new TableColumn<>("Image URL");
         colImage.setCellValueFactory(new PropertyValueFactory<>("imageUrl"));
 
-        table.getColumns().addAll(colAsin, colTitle, colPrice, colImage);
+        TableColumn<Product, String> colStock = new TableColumn<>("Stock");
+        colStock.setCellValueFactory(new PropertyValueFactory<>("stock"));
+
+        table.getColumns().addAll(colAsin, colTitle, colPrice, colImage, colStock);
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
 
         table.getSelectionModel().setCellSelectionEnabled(true);
@@ -108,24 +108,10 @@ public class MainApp extends Application {
             File file = fileChooser.showSaveDialog(primaryStage);
 
             if (file != null) {
-                try (PrintWriter writer = new PrintWriter(file, StandardCharsets.UTF_8)) {
-                    writer.write('\ufeff');
-
-                    // cột
-                    writer.println("ASIN,Title,Price,Image URL");
-
-                    // hàng
-                    for (Product p : productList) {
-                        String asin = escapeCsv(p.getAsin());
-                        String title = escapeCsv(p.getTitle());
-                        String price = escapeCsv(p.getPrice());
-                        String imageUrl = escapeCsv(p.getImageUrl());
-
-                        writer.println(asin + "," + title + "," + price + "," + imageUrl);
-                    }
+                try {
+                    CsvExporter.export(productList, file);
                     lblStatus.setText("Đã xuất CSV thành công!");
-                }
-                catch (Exception e) {
+                } catch (Exception e) {
                     e.printStackTrace();
                     lblStatus.setText("Lỗi khi lưu file: " + e.getMessage());
                 }
@@ -137,67 +123,144 @@ public class MainApp extends Application {
             if (url.isEmpty()) return;
 
             btnCrawl.setDisable(true);
+            btnExport.setDisable(true);
             productList.clear();
             lblStatus.setText("Đang khởi động Chrome...");
 
             Thread scrapeThread = new Thread(() -> {
-                WebDriver driver = null;
+                DriverManager driverMgr = null;
                 try {
-                    WebDriverManager.chromedriver().setup();
                     ChromeOptions options = new ChromeOptions();
-                    driver = new ChromeDriver(options);
-
-                    driver.manage().timeouts().implicitlyWait(Duration.ofSeconds(5));
-                    driver.get(url);
-
-                    Platform.runLater(() -> lblStatus.setText("Đang lấy list ASIN..."));
-
-                    List<WebElement> itemElements = driver.findElements(By.xpath("//div[@data-asin and string-length(@data-asin)>0]"));
-
-                    List<String> asinList = new ArrayList<>();
-                    for (WebElement el : itemElements) {
-                        asinList.add(el.getAttribute("data-asin"));
+                    driverMgr = new DriverManager(options,
+                            msg -> Platform.runLater(() -> lblStatus.setText(msg)));
+                    driverMgr.createDriver();
+                    boolean opened = driverMgr.executeWithRetry(url, d -> d.get(url));
+                    if (!opened) {
+                        throw new RuntimeException("Khong the mo URL sau khi restart Chrome");
                     }
 
-                    Platform.runLater(() -> lblStatus.setText("Tìm thấy " + asinList.size() + " ASIN. Đang lấy chi tiết..."));
+                    // ========== GIAI ĐOẠN 1: Gom ASIN từ tất cả các trang ==========
+                    Set<String> asinSet = new LinkedHashSet<>();
+                    int pageNum = 1;
+                    String currentPageUrl = url;
 
-                    for (int i = 0; i < Math.min(asinList.size(), 5); i++) {
-                        String asin = asinList.get(i);
-                        driver.get("https://www.amazon.co.jp/dp/" + asin);
+                    while (true) {
+                        final int currentPage = pageNum;
+                        final String scanPageUrl = currentPageUrl;
+                        final boolean[] hasNextPage = {false};
+                        final String[] nextPageUrl = {scanPageUrl};
+                        boolean success = driverMgr.executeWithRetry(scanPageUrl, d -> {
+                            Platform.runLater(() -> lblStatus.setText("Đang quét trang " + currentPage + "..."));
 
-                        if (driver.getTitle().toLowerCase().contains("captcha")) {
-                            throw new RuntimeException("Bị chặn Captcha ở ASIN: " + asin);
+                            List<WebElement> itemElements = d.findElements(
+                                    By.xpath("//div[@data-asin and string-length(@data-asin)>0]")
+                            );
+                            for (WebElement el : itemElements) {
+                                String asin = el.getAttribute("data-asin");
+                                if (asin != null && !asin.isBlank()) {
+                                    asinSet.add(asin);
+                                }
+                            }
+
+                            // Tìm nút Next
+                            List<WebElement> nextBtns = d.findElements(
+                                    By.cssSelector("a.s-pagination-next")
+                            );
+
+                            // Dừng nếu: không có nút Next, hoặc Next bị disabled
+                            if (nextBtns.isEmpty()
+                                    || nextBtns.get(0).getAttribute("class").contains("s-pagination-disabled")) {
+                                hasNextPage[0] = false;
+                                return;
+                            }
+
+                            WebElement nextBtn = nextBtns.get(0);
+                            String href = nextBtn.getAttribute("href");
+                            hasNextPage[0] = true;
+                            nextPageUrl[0] = (href != null && !href.isBlank()) ? href : scanPageUrl;
+
+                            nextBtn.click();
+                            Thread.sleep(2000); // Chờ trang load
+//                            if (href == null || href.isBlank()) {
+//                                nextPageUrl[0] = d.getCurrentUrl();
+//                            }
+                        });
+
+                        if (!success) {
+                            Platform.runLater(() -> lblStatus.setText(
+                                    "Dừng quét ASIN: không thể khôi phục Chrome sau khi bị đóng"
+                            ));
+                            break;
                         }
 
-                        String title = AmazonParserService.extractTitle(driver);
-                        String price = AmazonParserService.extractPrice(driver);
-                        String imageUrl = AmazonParserService.extractImage(driver);
+                        if (!hasNextPage[0]) {
+                            break;
+                        }
 
-                        Product p = new Product(asin, title, price, imageUrl);
+                        currentPageUrl = nextPageUrl[0];
+                        pageNum++;
+                    }
 
-                        Platform.runLater(() -> {
-                            productList.add(p);
-                            lblStatus.setText("Đã lấy: " + asin);
+                    final int totalPages = pageNum;
+                    final int totalAsins = asinSet.size();
+                    Platform.runLater(() -> lblStatus.setText(
+                            "Tìm thấy " + totalAsins + " ASIN từ " + totalPages + " trang. Đang lấy chi tiết..."
+                    ));
+
+                    // ========== GIAI ĐOẠN 2: Vào từng /dp/{asin} lấy chi tiết ==========
+                    List<String> asinList = new ArrayList<>(asinSet);
+                    final DriverManager mgr = driverMgr; // effectively final for lambda
+
+                    for (int i = 0; i < Math.min(asinList.size(), 10); i++) {
+                        String asin = asinList.get(i);
+                        int idx = i + 1;
+                        Platform.runLater(() -> lblStatus.setText(
+                                "Đang lấy " + idx + "/" + asinList.size() + ": " + asin
+                        ));
+
+                        String productUrl = "https://www.amazon.co.jp/dp/" + asin;
+
+                        boolean success = mgr.executeWithRetry(productUrl, d -> {
+                            d.get(productUrl);
+
+                            if (d.getTitle().toLowerCase().contains("captcha")) {
+                                throw new RuntimeException("Bị chặn Captcha ở ASIN: " + asin);
+                            }
+
+                            String title = AmazonParserService.extractTitle(d);
+                            String price = AmazonParserService.extractPrice(d);
+                            String imageUrl = AmazonParserService.extractImage(d);
+                            String stock = AmazonParserService.extractStock(d);
+
+                            Product p = new Product(asin, title, price, imageUrl, stock);
+                            Platform.runLater(() -> {
+                                productList.add(p);
+                                lblStatus.setText("Đã lấy: " + asin);
+                            });
                         });
+
+                        if (!success) {
+                            Platform.runLater(() -> lblStatus.setText(
+                                    "Dừng crawl: không thể khôi phục Chrome sau khi bị đóng"
+                            ));
+                            break;
+                        }
 
                         Thread.sleep(2000);
                     }
 
-                    Platform.runLater(() -> lblStatus.setText("Hoàn tất!"));
+                    Platform.runLater(() -> lblStatus.setText("Hoàn tất! Đã lấy " + productList.size() + " sản phẩm."));
 
                 } catch (Exception e) {
+                    System.out.println("Lỗi crawl: " + e.getMessage());
                     e.printStackTrace();
                     Platform.runLater(() -> lblStatus.setText("Lỗi: " + e.getMessage()));
                 } finally {
-                    try {
-                        if (driver != null) {
-                            driver.quit();
-                        }
-                    } catch (Exception ex) {
-                        System.err.println("Lỗi khi giải phóng ChromeDriver: " + ex.getMessage());
-                    } finally {
-                        Platform.runLater(() -> btnCrawl.setDisable(false));
-                    }
+                    if (driverMgr != null) driverMgr.quitSafely();
+                    Platform.runLater(() -> {
+                        btnCrawl.setDisable(false);
+                        btnExport.setDisable(false);
+                    });
                 }
             });
 
@@ -211,21 +274,6 @@ public class MainApp extends Application {
         primaryStage.show();
     }
 
-    /**
-     * Hàm phụ trợ (Helper method) giúp làm sạch chuỗi trước khi ném vào CSV.
-     * Nếu chuỗi có chứa dấu phẩy, nháy kép hoặc xuống dòng, nó sẽ bọc ngoặc kép lại.
-     */
-    private String escapeCsv(String data) {
-        if (data == null) return "";
-        // Nếu trong chuỗi có sẵn dấu ngoặc kép, phải nhân đôi nó lên theo quy tắc CSV
-        String escapedData = data.replace("\"", "\"\"");
-
-        // Nếu có chứa ký tự đặc biệt làm vỡ cấu trúc CSV, bọc toàn bộ bằng ngoặc kép
-        if (escapedData.contains(",") || escapedData.contains("\"") || escapedData.contains("\n")) {
-            escapedData = "\"" + escapedData + "\"";
-        }
-        return escapedData;
-    }
 
     public static void main(String[] args) {
         launch(args);

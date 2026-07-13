@@ -5,13 +5,14 @@ public class Product {
     private String title;
     private String price;
     private String imageUrl;
+    private String stock;
 
-    // Cập nhật Constructor để nhận 4 tham số
-    public Product(String asin, String title, String price, String imageUrl) {
+    public Product(String asin, String title, String price, String imageUrl, String stock) {
         this.asin = asin;
         this.title = title;
         this.price = price;
         this.imageUrl = imageUrl;
+        this.stock = stock;
     }
 
     public String getAsin() {
@@ -28,5 +29,8 @@ public class Product {
 
     public String getImageUrl() {
         return imageUrl;
+    }
+    public String getStock() {
+        return stock;
     }
 }
